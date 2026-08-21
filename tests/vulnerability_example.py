@@ -1,0 +1,4 @@
+import os
+
+filename = input("Enter filename: ")
+os.system("cat " + filename)

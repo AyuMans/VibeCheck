@@ -1,0 +1,10 @@
+rules:
+  - id: python-os-system-command
+    languages:
+      - python
+    severity: ERROR
+    message: >
+      Dynamically constructed data passed to os.system()
+      can lead to shell command injection.
+    patterns:
+      - pattern: os.system(...)
