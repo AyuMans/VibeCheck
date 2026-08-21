@@ -19,8 +19,6 @@ Pay special attention to:
 - Authentication or authorization problems
 - Logic errors
 
-Do not claim that there are no issues if untrusted input directly influences a shell command.
-
 For each finding:
 - title: concise issue name
 - category: security, bug, or code_quality
@@ -28,6 +26,9 @@ For each finding:
 - evidence: exact relevant code
 - impact: why the issue matters
 - remediation: a concrete way to fix it
+- "source": ["ai"]
+
+Every finding must have `"source": "ai"`.
 
 Analyze this code:
 

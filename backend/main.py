@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from backend.models import CodeReviewRequest, CodeReviewResponse
-from backend.review_service import review_code
+from backend.analysis_service import analyze_code
 
 
 app = FastAPI(
@@ -24,15 +24,16 @@ def health_check():
         "status": "healthy"
     }
 
-
 @app.post("/review-code", response_model=CodeReviewResponse)
 def review_code_endpoint(request: CodeReviewRequest):
-    review = review_code(
+    analysis = analyze_code(
         code=request.code,
         language=request.language
     )
 
     return {
         "language": request.language,
-        **review
+        "summary": analysis["summary"],
+        "findings": analysis["findings"],
+        "policy": analysis["policy"]
     }
