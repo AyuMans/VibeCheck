@@ -1,0 +1,11 @@
+{
+  "policy_name": "Default Security Policy",
+  "version": "1.0",
+  "rules": {
+    "no_findings": "PASS",
+    "LOW": "PASS",
+    "MEDIUM": "NEEDS_REVIEW",
+    "HIGH": "NEEDS_REVIEW",
+    "CRITICAL": "FAIL"
+  }
+}

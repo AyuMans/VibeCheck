@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class CodeReviewRequest(BaseModel):
@@ -13,6 +13,7 @@ class Finding(BaseModel):
     evidence: str
     impact: str
     remediation: str
+    source: list[str]
 
 
 class AIReview(BaseModel):
@@ -20,5 +21,14 @@ class AIReview(BaseModel):
     findings: list[Finding]
 
 
-class CodeReviewResponse(AIReview):
+class PolicyResult(BaseModel):
+    policy: str
+    decision: str
+    highest_severity: str | None
+
+
+class CodeReviewResponse(BaseModel):
     language: str
+    summary: str
+    findings: list[Finding]
+    policy: PolicyResult
