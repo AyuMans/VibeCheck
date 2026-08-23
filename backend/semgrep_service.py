@@ -51,32 +51,56 @@ def scan_code(code: str, language: str) -> list[Finding]:
 
         for finding in data.get("results", []):
             extra = finding.get("extra", {})
+            metadata = extra.get("metadata", {})
             start = finding.get("start", {})
-            end = finding.get("end", {})
 
             findings.append(
                 Finding(
-                    title=finding.get("check_id", "Semgrep Finding"),
-                    category="security",
-                    severity="HIGH",
+                    title=metadata.get(
+                        "issue_type",
+                        finding.get("check_id", "Semgrep Finding")
+                    ),
+
+                    category=metadata.get(
+                        "category",
+                        "security"
+                    ),
+
+                    severity=metadata.get(
+                        "severity",
+                        extra.get("severity", "MEDIUM")
+                    ).upper(),
+
                     evidence=extra.get(
                         "message",
                         "Security issue detected by Semgrep."
+                    ).strip(),
+
+                    impact=metadata.get(
+                        "impact",
+                        (
+                            f"Detected by rule "
+                            f"{finding.get('check_id')} "
+                            f"at line {start.get('line', 'unknown')}."
+                        )
                     ),
-                    impact=(
-                        f"Detected by rule {finding.get('check_id')} "
-                        f"at line {start.get('line', 'unknown')}."
+
+                    remediation=metadata.get(
+                        "remediation",
+                        "Review the flagged code and apply the recommended security fix."
                     ),
-                    remediation=(
-                        "Review the flagged code and avoid passing "
-                        "untrusted or dynamically constructed input "
-                        "to shell commands."
-                    ),
+
                     source=["semgrep"]
                 )
             )
 
         return findings
+
+    except subprocess.TimeoutExpired:
+        return []
+
+    except json.JSONDecodeError:
+        return []
 
     finally:
         if temp_file_path and os.path.exists(temp_file_path):

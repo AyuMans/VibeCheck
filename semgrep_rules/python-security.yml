@@ -1,10 +1,194 @@
 rules:
+
+  # ==========================================
+  # SHELL / COMMAND EXECUTION
+  # ==========================================
+
+  # Rule 1: Detect user-controlled input reaching os.system()
   - id: python-os-system-command
     languages:
       - python
     severity: ERROR
-    message: >
-      Dynamically constructed data passed to os.system()
-      can lead to shell command injection.
+
+    message: User-controlled input reaches os.system() command execution.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: SHELL_COMMAND_EXECUTION
+      impact: User-controlled data may reach the system shell and allow command injection.
+      remediation: Avoid os.system() with user-controlled commands. Use safer Python APIs or subprocess with a fixed argument list and shell=False.
+
+    mode: taint
+
+    pattern-sources:
+      - pattern: input(...)
+
+    pattern-sinks:
+      - pattern: os.system($CMD)
+
+
+  # Rule 2: Detect subprocess execution using shell=True
+  - id: python-subprocess-shell-true
+    languages:
+      - python
+
+    severity: ERROR
+
+    message: subprocess execution uses shell=True.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: SHELL_COMMAND_EXECUTION
+      impact: shell=True can allow command injection when command data contains untrusted input.
+      remediation: Avoid shell=True. Pass commands as an argument list with shell=False.
+
+    pattern-either:
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.call(..., shell=True, ...)
+      - pattern: subprocess.Popen(..., shell=True, ...)
+
+
+  # ==========================================
+  # UNSAFE DESERIALIZATION
+  # ==========================================
+
+  # Rule 3: Detect pickle.loads()
+  - id: python-unsafe-pickle-loads
+    languages:
+      - python
+
+    severity: ERROR
+
+    message: pickle.loads() can execute code when deserializing untrusted data.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: UNSAFE_DESERIALIZATION
+      impact: Deserializing untrusted pickle data can result in arbitrary code execution.
+      remediation: Do not deserialize untrusted data with pickle. Use a safer serialization format such as JSON where appropriate.
+
+    pattern: pickle.loads(...)
+
+
+  # Rule 4: Detect pickle.load()
+  - id: python-unsafe-pickle-load
+    languages:
+      - python
+
+    severity: ERROR
+
+    message: pickle.load() can execute code when loading untrusted serialized data.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: UNSAFE_DESERIALIZATION
+      impact: Loading untrusted pickle data can result in arbitrary code execution.
+      remediation: Do not load untrusted pickle files. Use a safer data format where possible.
+
+    pattern: pickle.load(...)
+
+
+  # ==========================================
+  # DYNAMIC CODE EXECUTION
+  # ==========================================
+
+  # Rule 5: Detect eval()
+  - id: python-dangerous-eval
+    languages:
+      - python
+
+    severity: ERROR
+
+    message: eval() executes dynamically evaluated Python expressions.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: DYNAMIC_CODE_EXECUTION
+      impact: Untrusted data passed to eval() may execute unintended Python code.
+      remediation: Avoid eval(). Use explicit parsing or safer alternatives such as ast.literal_eval when appropriate.
+
+    pattern: eval(...)
+
+
+  # Rule 6: Detect exec()
+  - id: python-dangerous-exec
+    languages:
+      - python
+
+    severity: ERROR
+
+    message: exec() executes dynamically supplied Python code.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: DYNAMIC_CODE_EXECUTION
+      impact: Untrusted data passed to exec() may execute arbitrary Python code.
+      remediation: Avoid exec() on dynamic or untrusted data.
+
+    pattern: exec(...)
+
+
+  # ==========================================
+  # SQL QUERY CONSTRUCTION
+  # ==========================================
+
+  # Rule 7: Detect SQL query construction using string concatenation
+  - id: python-sql-string-concatenation
+    languages:
+      - python
+
+    severity: WARNING
+
+    message: SQL query appears to be constructed using string concatenation.
+
+    metadata:
+      category: security
+      severity: HIGH
+      issue_type: SQL_INJECTION
+      impact: Concatenating untrusted values into SQL queries can allow SQL injection.
+      remediation: Use parameterized queries or prepared statements instead of string concatenation.
+
     patterns:
-      - pattern: os.system(...)
+      - pattern-either:
+          - pattern: $QUERY = $A + $B
+          - pattern: $QUERY = $A + $B + ...
+
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: (?i).*(query|sql|statement).*
+
+
+  # ==========================================
+  # HARDCODED SECRETS
+  # ==========================================
+
+  # Rule 8: Detect possible hardcoded passwords or secrets
+  - id: python-hardcoded-password
+    languages:
+      - python
+
+    severity: WARNING
+
+    message: Possible hardcoded password or secret.
+
+    metadata:
+      category: security
+      severity: MEDIUM
+      issue_type: HARDCODED_SECRET
+      impact: Secrets stored directly in source code may be exposed through source control or unauthorized access.
+      remediation: Store secrets in environment variables or a dedicated secrets-management system.
+
+    patterns:
+      - pattern-either:
+          - pattern: $PASSWORD = "..."
+          - pattern: $PASSWORD = '...'
+
+      - metavariable-regex:
+          metavariable: $PASSWORD
+          regex: (?i).*(password|passwd|secret|api_key|token).*
