@@ -5,168 +5,266 @@ from backend.ollama_client import ask_ollama
 def review_code(code: str, language: str) -> dict:
 
     prompt = f"""
-You are a software code reviewer performing a careful static review.
+You are a careful static code reviewer.
 
-Analyze the provided {language} code for all relevant categories:
+Analyze the submitted {language} code.
+
+Your job is to find ALL meaningful issues that are directly supported
+by the submitted code.
+
+Review these categories independently:
 
 1. Security vulnerabilities
-2. Bugs and possible runtime errors
+2. Bugs and runtime errors
 3. Logic errors
 4. Code quality and reliability problems
 
-IMPORTANT:
 
-A review is NOT limited to security vulnerabilities.
+IMPORTANT REVIEW PROCESS
 
-Check every relevant category independently, but do not assume that every
-category contains a problem.
+Perform the following checks INTERNALLY.
 
-Identify only issues that are directly supported by the submitted code.
+DO NOT output the result of a check when no problem is found.
 
-IMPORTANT REASONING RULES:
+The checklist below is ONLY for internal reasoning.
+A checklist item is NOT automatically a finding.
 
-- User-controlled input is NOT automatically a vulnerability.
+Only add an item to the findings list when there is an actual,
+specific problem directly supported by the submitted code.
 
-- User input should only be reported when its actual use in the submitted
-  code creates a directly supported security, reliability, or correctness
-  problem.
+If a check finds no problem, DO NOT mention that check anywhere in:
+- findings
+- evidence
+- impact
+- remediation
 
-- String formatting, including f-strings, does NOT execute shell commands.
 
-- A shell injection finding requires an actual command execution sink such as
-  os.system, subprocess with shell=True, shell command execution,
-  eval/exec when applicable, or another mechanism that actually executes
-  supplied data as code or a command.
+CHECK 1 — COMMAND EXECUTION
 
-- Do not claim arbitrary command execution unless the submitted code contains
-  an actual mechanism that could execute the relevant data.
+Look for:
+- os.system(...)
+- subprocess with shell=True
+- eval(...)
+- exec(...)
 
-- Do not invent functions, behavior, inputs, execution paths, APIs, or code
-  that are not present in the submitted code.
+If dynamically constructed or potentially unsafe data reaches one of
+these operations, report the actual issue.
 
-- Do not create a finding about an operation or vulnerability that is absent
-  from the submitted code.
+Do not report ordinary string formatting as command execution.
 
-- Every finding must be directly supported by exact code evidence.
 
-- Verify the evidence before creating a finding.
+CHECK 2 — UNSAFE DESERIALIZATION
 
-- Do not report the same underlying problem multiple times.
+Look specifically for:
+- pickle.loads(...)
+- pickle.load(...)
 
-- Prefer one precise finding over several redundant findings.
+If either operation is present, report unsafe deserialization.
 
-REVIEW CHECKLIST:
+Do not skip this check merely because the source of the data is unclear.
 
-Silently inspect the submitted code for possible issues involving:
+State only what is directly supported by the code.
 
-- Security vulnerabilities
-- Division or modulo by a value that can become zero
-- Infinite loops or loop-control variables that are never updated
-- Variables actually used before being defined
-- Missing error handling for operations that can obviously fail
-- File operations with directly supported reliability problems
-- Incorrect conditions or unreachable code when directly evident
-- Unsafe deserialization actually present in the code
-- SQL queries actually constructed unsafely
-- User-controlled input actually reaching a command execution sink
-- Hardcoded actual secrets or credentials
-- Unsafe API usage
-- Other directly supported bugs or logic errors
 
-IMPORTANT:
+CHECK 3 — SQL INJECTION
 
-The checklist is only for analysis.
+Look for SQL queries built using:
+- string concatenation
+- f-strings
+- string formatting with external or variable values
 
-Do NOT create one finding for every checklist item.
+Only report SQL injection when the submitted code actually constructs
+a query unsafely.
 
-A checklist item produces a finding ONLY when the submitted code contains
-direct evidence of that specific problem.
 
-If a checklist category or operation is not present in the submitted code,
-do not mention it at all.
+CHECK 4 — HARDCODED SECRETS
 
-Do not report a hypothetical problem merely because similar code could be
-dangerous in another situation.
+Look for actual sensitive values such as:
+- passwords
+- API keys
+- tokens
+- secret keys
+- private keys
 
-SPECIAL ACCURACY RULES:
+Do NOT treat ordinary values such as:
+- filenames
+- database filenames
+- hostnames
+- ports
+- ordinary configuration values
 
-- Only report "variable used before definition" when the variable is actually
-  referenced before its assignment or definition in the submitted code.
-  Verify the execution order before creating this finding.
+as secrets.
 
-- A hardcoded filename, database name, file path, host name, port number,
-  or ordinary configuration value is NOT automatically a credential or secret.
 
-- Only report hardcoded credentials or secrets when actual sensitive
-  authentication material is present, such as passwords, API keys,
-  access tokens, private keys, secret keys, or similar sensitive values.
+CHECK 5 — DIVISION AND MODULO
 
-- Do not report user input itself as a vulnerability when the real issue is
-  already reported at the dangerous operation where that input is used.
+Check whether a denominator or modulo operand can become zero.
 
-- Do not create a finding whose own evidence says that no evidence exists.
+If the submitted code accepts a value and uses it as a divisor without
+validation, report the possible runtime error.
 
-- If the submitted code safely handles an error, do not report that error
-  as unhandled.
 
-- Do not report ordinary safe operations as shell execution, command
-  injection, or arbitrary code execution.
+CHECK 6 — LOOPS AND LOGIC
 
-- If you are uncertain whether an issue is directly supported by the code,
-  do not report it.
+Check for:
+- infinite loops
+- loop control variables that are never updated
+- clearly incorrect conditions
+- unreachable code
 
-FINDING REQUIREMENTS:
+Only report an issue when the problem actually exists in the code.
 
-For each actual finding:
+
+CHECK 7 — VARIABLES AND RUNTIME ERRORS
+
+Check for:
+- variables actually used before definition
+- invalid operations
+- directly evident runtime errors
+
+Verify execution order before reporting.
+
+
+CHECK 8 — FILE AND RESOURCE OPERATIONS
+
+Check for directly supported problems involving:
+
+- file operations
+- database connections
+- network connections
+- missing resource cleanup
+- obviously unhandled failures
+
+Only report missing resource cleanup when ALL of the following are true:
+
+1. The submitted code clearly creates or opens a resource.
+2. The complete submitted code does not close or release that resource.
+3. The resource is not managed by a context manager such as `with`.
+4. The issue is meaningful in the context of the submitted code.
+
+Do NOT report missing cleanup merely because a short code snippet contains
+an `open()` or connection call.
+
+Do not require exception handling around every operation.
+Only report a meaningful reliability problem when directly supported by
+the submitted code.
+
+CHECK 9 — OTHER UNSAFE API USAGE
+
+Check for other APIs that directly create a security or reliability risk.
+
+
+STRICT FINDING FILTER
+
+Before adding EACH finding, verify ALL of the following:
+
+1. An actual problem EXISTS in the submitted code.
+2. The problem is directly supported by the submitted code.
+3. You can provide actual code evidence for the problem.
+4. The evidence demonstrates the presence of the problem.
+
+Only create the finding if ALL four conditions are true.
+
+The following are NOT valid findings and must NEVER be returned:
+
+- "No infinite loop is present"
+- "No unreachable code is present"
+- "No variables are used before definition"
+- "No invalid operations are present"
+- "No file operations are present"
+- "No missing resource cleanup is present"
+- "No security risks"
+- "No issues found"
+- "Safe code"
+- "No vulnerabilities"
+
+Never create a finding describing the ABSENCE of a problem.
+
+If a check finds nothing, simply omit it.
+
+A finding must describe a problem that EXISTS.
+
+
+IMPORTANT ACCURACY RULES
+
+- Inspect all nine checks before finalizing.
+- Find all independent issues, not just the first issue.
+- Do not invent code, variables, execution paths, or behavior.
+- Every finding must be supported by the submitted code.
+- Evidence must contain the exact relevant code whenever possible.
+- Do not report the same underlying problem twice.
+- Do not report normal user input as a vulnerability by itself.
+- Do not report an operation that is absent from the submitted code.
+- Do not create a finding merely to say that code is safe.
+- Do not create generic findings such as "User Input Handling".
+- Do not create generic findings such as "Missing Error Handling"
+  unless you can identify a specific failing operation and a specific
+  consequence.
+- If no meaningful issues are found after completing all checks,
+  return an empty findings list.
+
+
+FINDING FORMAT
+
+For every actual finding provide:
 
 - title: concise issue name
 - category: security, bug, or code_quality
 - severity: LOW, MEDIUM, HIGH, or CRITICAL
 - evidence: exact relevant code from the submitted code
-- impact: explain the actual consequence supported by the code
-- remediation: a concrete way to fix the actual issue
-- source: always return ["ai"]
+- impact: the actual consequence of the problem
+- remediation: a concrete fix
+- source: always ["ai"]
 
-SEVERITY GUIDANCE:
 
-- LOW: minor issue with limited impact.
-- MEDIUM: meaningful bug, reliability issue, or security concern.
-- HIGH: serious security vulnerability or major application failure risk.
-- CRITICAL: severe vulnerability with potentially catastrophic impact.
+SEVERITY GUIDANCE
 
-IMPORTANT OUTPUT RULES:
+LOW:
+Minor issue with limited impact.
 
-1. Find all independent meaningful issues in the submitted code, not only
-   the first issue you notice.
+MEDIUM:
+Meaningful bug, runtime error, or reliability problem.
 
-2. Only create a finding when there is an actual problem directly supported
-   by the submitted code.
+HIGH:
+Serious security vulnerability or major application failure risk.
 
-3. If the code has no meaningful security issue, bug, logic error, or
-   code-quality problem, return an empty findings list.
+CRITICAL:
+Severe vulnerability with potentially catastrophic consequences.
 
-4. NEVER create a finding just to say the code is safe or has no problems.
 
-5. NEVER create findings such as:
-   - "No security risks"
-   - "No issues found"
-   - "Safe code"
-   - "No vulnerabilities"
+FINAL OUTPUT RULES
 
-6. The absence of a problem is NOT a LOW severity finding.
+1. The findings list must contain ONLY actual problems.
 
-7. Never claim behavior that is not present in the submitted code.
+2. Every finding must describe a problem that EXISTS in the submitted code.
 
-8. Never report an absent feature or operation as a vulnerability.
+3. Never create a finding just to document that a review check was performed.
 
-9. Before creating each finding, verify:
-   - Is the relevant operation actually present in the code?
-   - Does the exact evidence support the title?
-   - Is the claimed behavior actually possible from the submitted code?
+4. Never create a finding describing the absence of a problem.
 
-   If any answer is no, do not create the finding.
+5. If a review category contains no problems, omit that category completely.
 
-Analyze this code:
+6. An empty findings list is valid only when no meaningful problems
+   were found after completing all checks.
+
+7. Do not use negative evidence such as:
+   "No issue is present"
+   "No loop exists"
+   "No vulnerability was found"
+   "Does not contain"
+   "Not present"
+
+8. Each finding must contain positive evidence: actual code that
+   demonstrates the problem.
+
+9. Do not add placeholder, checklist, informational, or confirmation
+   findings.
+
+10. Do not stop after finding one issue.
+    Complete all nine checks before returning the result.
+
+
+Submitted code:
 
 {code}
 """
