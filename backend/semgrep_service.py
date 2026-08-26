@@ -116,21 +116,23 @@ def scan_code(code: str, language: str) -> list[Finding]:
                 ).strip()
 
             findings.append(
-                Finding(
-                    title=title,
 
+                Finding(
+            
+                    title=title,
+            
                     category=metadata.get(
                         "category",
                         "security"
                     ),
-
+            
                     severity=metadata.get(
                         "severity",
                         extra.get("severity", "MEDIUM")
                     ).upper(),
-
+            
                     evidence=evidence,
-
+            
                     impact=metadata.get(
                         "impact",
                         (
@@ -139,7 +141,7 @@ def scan_code(code: str, language: str) -> list[Finding]:
                             f"at line {start_line}."
                         )
                     ),
-
+            
                     remediation=metadata.get(
                         "remediation",
                         (
@@ -147,11 +149,16 @@ def scan_code(code: str, language: str) -> list[Finding]:
                             "the recommended security fix."
                         )
                     ),
-
-                    source=["semgrep"]
+            
+                    source=["semgrep"],
+            
+                    line_start=start_line,
+            
+                    line_end=end_line
+            
                 )
+            
             )
-
         return findings
 
     except subprocess.TimeoutExpired:
