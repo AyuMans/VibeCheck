@@ -2,278 +2,741 @@ from backend.models import AIReview
 from backend.ollama_client import ask_ollama
 
 
-def review_code(code: str, language: str) -> dict:
+# ==========================================================
+# Evidence validation helpers
+# ==========================================================
+
+def _normalize_text(text: str | None) -> str:
+    """
+    Normalize whitespace so small formatting differences
+    do not prevent evidence comparison.
+    """
+
+    if not text:
+        return ""
+
+    return " ".join(text.split())
+
+
+def _evidence_exists_in_code(
+    code: str,
+    evidence: str,
+) -> bool:
+    """
+    Verify that AI-generated evidence actually exists
+    somewhere in the submitted source code.
+    """
+
+    if not code or not evidence:
+        return False
+
+    normalized_code = _normalize_text(code)
+    normalized_evidence = _normalize_text(evidence)
+
+    if not normalized_evidence:
+        return False
+
+    return normalized_evidence in normalized_code
+
+
+def _find_evidence_lines(
+    code: str,
+    evidence: str,
+) -> tuple[int | None, int | None]:
+    """
+    Determine the 1-based source-code line range
+    corresponding to the AI evidence.
+    """
+
+    if not code or not evidence:
+        return None, None
+
+    code_lines = code.splitlines()
+
+    evidence_lines = [
+        line.strip()
+        for line in evidence.splitlines()
+        if line.strip()
+    ]
+
+    if not evidence_lines:
+        return None, None
+
+    # ------------------------------------------------------
+    # 1. Exact contiguous line matching
+    # ------------------------------------------------------
+
+    for start_index in range(len(code_lines)):
+
+        if (
+            start_index + len(evidence_lines)
+            > len(code_lines)
+        ):
+            break
+
+        matched = True
+
+        for offset, evidence_line in enumerate(
+            evidence_lines
+        ):
+
+            code_line = code_lines[
+                start_index + offset
+            ].strip()
+
+            if code_line != evidence_line:
+
+                matched = False
+                break
+
+        if matched:
+
+            return (
+                start_index + 1,
+                start_index + len(evidence_lines),
+            )
+
+    # ------------------------------------------------------
+    # 2. Normalized contiguous line matching
+    # ------------------------------------------------------
+
+    normalized_evidence_lines = [
+        _normalize_text(line)
+        for line in evidence_lines
+    ]
+
+    for start_index in range(len(code_lines)):
+
+        if (
+            start_index
+            + len(normalized_evidence_lines)
+            > len(code_lines)
+        ):
+            break
+
+        matched = True
+
+        for offset, evidence_line in enumerate(
+            normalized_evidence_lines
+        ):
+
+            code_line = _normalize_text(
+                code_lines[
+                    start_index + offset
+                ]
+            )
+
+            if code_line != evidence_line:
+
+                matched = False
+                break
+
+        if matched:
+
+            return (
+                start_index + 1,
+                start_index + len(evidence_lines),
+            )
+
+    # ------------------------------------------------------
+    # 3. Single-line expression matching
+    # ------------------------------------------------------
+
+    normalized_evidence = _normalize_text(
+        evidence
+    )
+
+    for index, code_line in enumerate(
+        code_lines
+    ):
+
+        normalized_code_line = _normalize_text(
+            code_line
+        )
+
+        if (
+            normalized_evidence
+            and normalized_evidence
+            in normalized_code_line
+        ):
+
+            return (
+                index + 1,
+                index + 1,
+            )
+
+    return None, None
+
+
+def _validate_ai_findings(
+    code: str,
+    review: AIReview,
+) -> AIReview:
+    """
+    Validate AI findings before they enter the
+    correlation pipeline.
+
+    A finding is retained only when:
+
+    1. Evidence exists in the submitted source.
+    2. The evidence can be located.
+    """
+
+    valid_findings = []
+
+    for finding in review.findings:
+
+        evidence = (
+            finding.evidence or ""
+        ).strip()
+
+        # --------------------------------------------------
+        # Evidence is mandatory.
+        # --------------------------------------------------
+
+        if not evidence:
+            continue
+
+        # --------------------------------------------------
+        # Evidence must exist in source code.
+        # --------------------------------------------------
+
+        if not _evidence_exists_in_code(
+            code,
+            evidence,
+        ):
+            continue
+
+        # --------------------------------------------------
+        # Determine actual source location.
+        # --------------------------------------------------
+
+        line_start, line_end = (
+            _find_evidence_lines(
+                code,
+                evidence,
+            )
+        )
+
+        # --------------------------------------------------
+        # Normalize AI source.
+        # --------------------------------------------------
+
+        finding.source = ["ai"]
+
+        # --------------------------------------------------
+        # Never trust model-provided line numbers.
+        # --------------------------------------------------
+
+        finding.line_start = line_start
+        finding.line_end = line_end
+
+        valid_findings.append(
+            finding
+        )
+
+    return AIReview(
+        summary=review.summary,
+        findings=valid_findings,
+    )
+
+
+# ==========================================================
+# AI Code Review
+# ==========================================================
+
+def review_code(
+    code: str,
+    language: str,
+) -> dict:
 
     prompt = f"""
-You are a careful static code reviewer.
+You are a STRICT static code security analyzer.
 
-Analyze the submitted {language} code.
+Analyze ONLY the submitted {language} source code.
 
-Your job is to find ALL meaningful issues that are directly supported
-by the submitted code.
+Your output will be consumed by another security-analysis system.
+Therefore, FALSE POSITIVES are worse than missing minor issues.
 
-Review these categories independently:
+Your most important rule is:
 
-1. Security vulnerabilities
-2. Bugs and runtime errors
-3. Logic errors
-4. Code quality and reliability problems
+ONLY REPORT A FINDING WHEN THE SUBMITTED CODE ITSELF PROVIDES
+CONCRETE EVIDENCE THAT THE PROBLEM EXISTS.
 
+Do NOT report theoretical possibilities.
 
-IMPORTANT REVIEW PROCESS
+Do NOT report something merely because it is sometimes considered
+bad practice.
 
-Perform the following checks INTERNALLY.
+Do NOT invent execution paths.
 
-DO NOT output the result of a check when no problem is found.
+Do NOT assume code that is not shown.
 
-The checklist below is ONLY for internal reasoning.
-A checklist item is NOT automatically a finding.
+Do NOT assume that a variable contains malicious input unless the
+submitted code provides evidence that it can.
 
-Only add an item to the findings list when there is an actual,
-specific problem directly supported by the submitted code.
+Do NOT report the absence of a problem.
 
-If a check finds no problem, DO NOT mention that check anywhere in:
-- findings
-- evidence
-- impact
-- remediation
+Do NOT create informational findings.
 
+============================================================
+EVIDENCE-FIRST ANALYSIS
+============================================================
 
-CHECK 1 — COMMAND EXECUTION
+Before creating ANY finding, silently perform these steps:
+
+1. Identify the exact suspicious operation.
+2. Locate that operation in the submitted source.
+3. Determine whether the operation actually creates a security,
+   bug, logic, or reliability problem.
+4. Determine the realistic consequence.
+5. Copy the smallest useful piece of actual source code as evidence.
+6. Reject the finding if any of these steps cannot be established.
+
+Every finding MUST contain positive evidence from the submitted code.
+
+For example, this is valid:
+
+    result = eval(user_input)
+
+because the submitted code actually contains eval() operating on
+user-controlled input.
+
+This is NOT valid:
+
+    for item in items:
+
+simply because loops can theoretically become infinite.
+
+============================================================
+SECURITY ANALYSIS
+============================================================
+
+CHECK 1 — COMMAND / CODE EXECUTION
 
 Look for:
+
 - os.system(...)
-- subprocess with shell=True
+- os.popen(...)
+- subprocess(..., shell=True)
+- subprocess.run(..., shell=True)
+- subprocess.Popen(..., shell=True)
 - eval(...)
 - exec(...)
 
-If dynamically constructed or potentially unsafe data reaches one of
-these operations, report the actual issue.
+Report the issue when the submitted code actually demonstrates
+unsafe command or code execution.
 
-Do not report ordinary string formatting as command execution.
+For os.system(), os.popen(), shell=True, eval(), and exec(),
+consider the operation itself dangerous when it is used with
+variable or externally supplied data.
 
+Do NOT report ordinary function calls or string formatting.
 
+============================================================
 CHECK 2 — UNSAFE DESERIALIZATION
+============================================================
 
-Look specifically for:
+Look for:
+
 - pickle.loads(...)
 - pickle.load(...)
+- yaml.load(...) with unsafe/default loading
+- other clearly unsafe deserialization APIs
 
-If either operation is present, report unsafe deserialization.
+If the dangerous API is actually present, report it.
 
-Do not skip this check merely because the source of the data is unclear.
+Do not invent a malicious payload.
 
-State only what is directly supported by the code.
-
-
+============================================================
 CHECK 3 — SQL INJECTION
+============================================================
 
-Look for SQL queries built using:
+Look for SQL queries constructed using:
+
 - string concatenation
 - f-strings
-- string formatting with external or variable values
+- % formatting
+- .format()
 
-Only report SQL injection when the submitted code actually constructs
-a query unsafely.
+Example:
 
+query = "SELECT * FROM users WHERE username = '" + username + "'"
 
+This is a valid finding.
+
+Parameterized queries such as:
+
+conn.execute(
+    "SELECT * FROM users WHERE username = ?",
+    (username,)
+)
+
+are NOT SQL injection.
+
+Do not report a database connection itself as SQL injection.
+
+============================================================
 CHECK 4 — HARDCODED SECRETS
+============================================================
 
-Look for actual sensitive values such as:
-- passwords
+Report actual sensitive credentials such as:
+
 - API keys
-- tokens
-- secret keys
+- passwords
+- authentication tokens
 - private keys
+- access tokens
+- secret keys
 
-Do NOT treat ordinary values such as:
-- filenames
-- database filenames
-- hostnames
-- ports
-- ordinary configuration values
+Example:
 
-as secrets.
+API_KEY = "sk-actual-secret-value"
 
+may be a finding.
 
-CHECK 5 — DIVISION AND MODULO
+Do NOT report:
 
-Check whether a denominator or modulo operand can become zero.
+DATABASE = "users.db"
 
-If the submitted code accepts a value and uses it as a divisor without
-validation, report the possible runtime error.
+Do NOT report:
 
+HOST = "localhost"
 
-CHECK 6 — LOOPS AND LOGIC
+Do NOT report:
 
-Check for:
+PORT = 5432
+
+Do NOT report ordinary filenames, database names,
+configuration values, or placeholder values as secrets.
+
+============================================================
+CHECK 5 — PATH TRAVERSAL
+============================================================
+
+Look for user-controlled or externally controlled paths used in
+file operations.
+
+Example:
+
+filename = input("Filename: ")
+file_path = base / filename
+file_path.read_text()
+
+This may be a path traversal vulnerability because the input is
+used directly to construct a filesystem path.
+
+Report it only when the submitted code provides enough evidence
+that the path is not restricted to the intended directory.
+
+============================================================
+CHECK 6 — FILE PERMISSION PROBLEMS
+============================================================
+
+Look for dangerous permission changes such as:
+
+os.chmod(filename, 0o777)
+
+Report overly permissive permissions when the submitted code
+actually applies them.
+
+Do not report ordinary file access as a permission vulnerability.
+
+============================================================
+CHECK 7 — DIVISION / MODULO ERRORS
+============================================================
+
+Report division-by-zero or modulo-by-zero only when the submitted
+code actually allows the denominator to become zero.
+
+Example:
+
+number = int(input("Number: "))
+result = 100 / number
+
+This is a meaningful potential runtime error because number can
+be zero.
+
+But:
+
+result = number / 5
+
+is NOT a division-by-zero finding.
+
+IMPORTANT:
+
+Do not infer unrelated conditions.
+
+For example:
+
+number / 0
+
+means division by zero regardless of whether number is 5, 10,
+100, or any other value.
+
+The numerator does not control whether division by zero occurs.
+
+============================================================
+CHECK 8 — LOOPS AND LOGIC
+============================================================
+
+Look for ACTUAL:
+
 - infinite loops
-- loop control variables that are never updated
-- clearly incorrect conditions
+- incorrect loop conditions
+- loop variables that fail to change when they must
 - unreachable code
+- contradictory conditions
+- obviously incorrect logic
 
-Only report an issue when the problem actually exists in the code.
+Do NOT report:
 
+for row in result:
 
-CHECK 7 — VARIABLES AND RUNTIME ERRORS
+as an infinite loop.
 
-Check for:
-- variables actually used before definition
-- invalid operations
-- directly evident runtime errors
+Do NOT report an unused loop variable as a security or bug finding
+unless its unused state demonstrably causes incorrect behavior.
 
-Verify execution order before reporting.
+Do NOT report a loop merely because its termination cannot be proven
+from a short snippet.
 
+============================================================
+CHECK 9 — VARIABLES AND RUNTIME ERRORS
+============================================================
 
-CHECK 8 — FILE AND RESOURCE OPERATIONS
+Look for actual:
 
-Check for directly supported problems involving:
+- use-before-definition
+- undefined variables
+- impossible operations
+- invalid type operations that are evident from the code
+- directly evident runtime exceptions
 
-- file operations
+Example:
+
+print(username)
+
+when username has never been defined is a valid finding.
+
+But:
+
+username = input("Username: ")
+print(username)
+
+is NOT a use-before-definition issue.
+
+============================================================
+CHECK 10 — RESOURCE MANAGEMENT
+============================================================
+
+Look for meaningful resource-management problems involving:
+
+- files
 - database connections
 - network connections
-- missing resource cleanup
-- obviously unhandled failures
+- locks
+- other manually managed resources
 
-Only report missing resource cleanup when ALL of the following are true:
+Only report missing cleanup when:
 
-1. The submitted code clearly creates or opens a resource.
-2. The complete submitted code does not close or release that resource.
-3. The resource is not managed by a context manager such as `with`.
-4. The issue is meaningful in the context of the submitted code.
+1. The resource is clearly created/opened.
+2. The submitted code is sufficiently complete to judge cleanup.
+3. No context manager or explicit cleanup exists.
+4. The missing cleanup could meaningfully affect reliability.
 
-Do NOT report missing cleanup merely because a short code snippet contains
-an `open()` or connection call.
+For short snippets, prefer NOT reporting missing cleanup when the
+surrounding lifecycle is unknown.
 
-Do not require exception handling around every operation.
-Only report a meaningful reliability problem when directly supported by
+Do not assume every open() requires a finding.
+
+============================================================
+CHECK 11 — OTHER SECURITY / RELIABILITY APIs
+============================================================
+
+Look for clearly unsafe API usage that is directly supported by
 the submitted code.
 
-CHECK 9 — OTHER UNSAFE API USAGE
+Do not generate generic "best practice" findings.
 
-Check for other APIs that directly create a security or reliability risk.
+============================================================
+FALSE POSITIVE PROTECTION
+============================================================
 
+NEVER return findings such as:
 
-STRICT FINDING FILTER
-
-Before adding EACH finding, verify ALL of the following:
-
-1. An actual problem EXISTS in the submitted code.
-2. The problem is directly supported by the submitted code.
-3. You can provide actual code evidence for the problem.
-4. The evidence demonstrates the presence of the problem.
-
-Only create the finding if ALL four conditions are true.
-
-The following are NOT valid findings and must NEVER be returned:
-
-- "No infinite loop is present"
-- "No unreachable code is present"
-- "No variables are used before definition"
-- "No invalid operations are present"
-- "No file operations are present"
-- "No missing resource cleanup is present"
-- "No security risks"
-- "No issues found"
-- "Safe code"
-- "No vulnerabilities"
-
-Never create a finding describing the ABSENCE of a problem.
-
-If a check finds nothing, simply omit it.
+- Infinite Loop for a normal for loop
+- Unreachable Code when the code is reachable
+- Unused Variable unless it actually causes a problem
+- Missing Error Handling merely because try/except is absent
+- Missing Resource Cleanup for an incomplete snippet
+- Hardcoded Secret for a filename
+- Hardcoded Secret for a database filename
+- Security Risk for normal input()
+- SQL Injection for parameterized queries
+- Command Injection for ordinary string operations
+- Path Traversal without actual path construction
+- Runtime Error without a concrete failing operation
 
 A finding must describe a problem that EXISTS.
 
+============================================================
+SEVERITY RULES
+============================================================
 
-IMPORTANT ACCURACY RULES
-
-- Inspect all nine checks before finalizing.
-- Find all independent issues, not just the first issue.
-- Do not invent code, variables, execution paths, or behavior.
-- Every finding must be supported by the submitted code.
-- Evidence must contain the exact relevant code whenever possible.
-- Do not report the same underlying problem twice.
-- Do not report normal user input as a vulnerability by itself.
-- Do not report an operation that is absent from the submitted code.
-- Do not create a finding merely to say that code is safe.
-- Do not create generic findings such as "User Input Handling".
-- Do not create generic findings such as "Missing Error Handling"
-  unless you can identify a specific failing operation and a specific
-  consequence.
-- If no meaningful issues are found after completing all checks,
-  return an empty findings list.
-
-
-FINDING FORMAT
-
-For every actual finding provide:
-
-- title: concise issue name
-- category: security, bug, or code_quality
-- severity: LOW, MEDIUM, HIGH, or CRITICAL
-- evidence: exact relevant code from the submitted code
-- impact: the actual consequence of the problem
-- remediation: a concrete fix
-- source: always ["ai"]
-
-
-SEVERITY GUIDANCE
-
-LOW:
-Minor issue with limited impact.
-
-MEDIUM:
-Meaningful bug, runtime error, or reliability problem.
-
-HIGH:
-Serious security vulnerability or major application failure risk.
+Use severity carefully.
 
 CRITICAL:
-Severe vulnerability with potentially catastrophic consequences.
 
+Only use CRITICAL for vulnerabilities where successful exploitation
+could directly result in severe consequences such as arbitrary code
+execution or equivalent complete compromise.
 
-FINAL OUTPUT RULES
+Examples may include:
 
-1. The findings list must contain ONLY actual problems.
+- eval(user_input)
+- exec(user_input)
+- unsafe pickle deserialization of untrusted data
 
-2. Every finding must describe a problem that EXISTS in the submitted code.
+HIGH:
 
-3. Never create a finding just to document that a review check was performed.
+Use HIGH for serious security vulnerabilities such as:
 
-4. Never create a finding describing the absence of a problem.
+- command injection
+- SQL injection
+- serious authentication/security failures
+- dangerous hardcoded credentials when clearly sensitive
 
-5. If a review category contains no problems, omit that category completely.
+MEDIUM:
 
-6. An empty findings list is valid only when no meaningful problems
-   were found after completing all checks.
+Use MEDIUM for meaningful but more limited issues such as:
 
-7. Do not use negative evidence such as:
-   "No issue is present"
-   "No loop exists"
-   "No vulnerability was found"
-   "Does not contain"
-   "Not present"
+- path traversal
+- dangerous file permissions
+- significant runtime failures
 
-8. Each finding must contain positive evidence: actual code that
-   demonstrates the problem.
+LOW:
 
-9. Do not add placeholder, checklist, informational, or confirmation
-   findings.
+Use LOW only for genuinely minor issues.
 
-10. Do not stop after finding one issue.
-    Complete all nine checks before returning the result.
+Do NOT inflate severity merely because an API is considered unsafe.
 
+============================================================
+DUPLICATE PREVENTION
+============================================================
 
-Submitted code:
+Do not report the same underlying problem multiple times.
+
+For example:
+
+query = "SELECT ... " + username
+result = conn.execute(query)
+
+should normally produce ONE SQL injection finding.
+
+Use the evidence that best demonstrates the vulnerability.
+
+============================================================
+SUMMARY
+============================================================
+
+The summary should briefly describe the overall review.
+
+Do not list categories that have no findings.
+
+Do not say "no vulnerabilities found" inside a finding.
+
+============================================================
+OUTPUT REQUIREMENTS
+============================================================
+
+Return ONLY findings for problems that actually exist.
+
+Every finding MUST contain:
+
+- title
+- category
+- severity
+- evidence
+- impact
+- remediation
+- source
+- line_start
+- line_end
+
+The evidence MUST be copied from the submitted code.
+
+The evidence MUST NOT contain invented code.
+
+The evidence should normally be one or a few relevant lines.
+
+Use:
+
+source: ["ai"]
+
+Line numbers are 1-based.
+
+If you cannot confidently determine the line number,
+use null.
+
+============================================================
+FINAL INTERNAL VALIDATION
+============================================================
+
+Before returning each finding, silently ask:
+
+1. Does this problem actually exist?
+2. Is the suspicious operation actually present?
+3. Is my evidence copied from the submitted code?
+4. Does the evidence demonstrate the problem?
+5. Am I assuming code that was not provided?
+6. Am I reporting a theoretical possibility instead of an actual issue?
+7. Is the severity justified?
+8. Is this a duplicate of another finding?
+9. Would a deterministic SAST analyzer reasonably consider this
+   a real issue?
+
+If any answer is NO, DO NOT RETURN THE FINDING.
+
+If no meaningful issues exist:
+
+findings = []
+
+Never create a finding simply because a checklist item was checked.
+
+============================================================
+SUBMITTED CODE
+============================================================
 
 {code}
 """
+
+    # ------------------------------------------------------
+    # Ask local AI for structured output.
+    # ------------------------------------------------------
 
     schema = AIReview.model_json_schema()
 
     answer = ask_ollama(
         prompt=prompt,
-        format_schema=schema
+        format_schema=schema,
     )
 
-    return AIReview.model_validate_json(answer).model_dump()
+    # ------------------------------------------------------
+    # Validate model response against Pydantic schema.
+    # ------------------------------------------------------
+
+    review = AIReview.model_validate_json(
+        answer
+    )
+
+    # ------------------------------------------------------
+    # Independently validate evidence and line numbers.
+    # ------------------------------------------------------
+
+    review = _validate_ai_findings(
+        code=code,
+        review=review,
+    )
+
+    return review.model_dump()

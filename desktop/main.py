@@ -1,5 +1,5 @@
 """
-AI DevSecOps Code Reviewer - desktop GUI.
+VibeCheck - desktop GUI.
 
 PySide6 desktop interface for the existing analysis backend.
 
@@ -1463,7 +1463,7 @@ def build_empty_state_card() -> QFrame:
 
     subtitle = QLabel(
         "The submitted code passed "
-        "the available review checks."
+        "the vibe check."
     )
 
     subtitle.setAlignment(
@@ -2154,7 +2154,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(
-            "AI DevSecOps Code Reviewer"
+            "VibeCheck"
         )
 
         self.resize(
@@ -2243,7 +2243,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
 
         title = QLabel(
-            "🛡 AI DevSecOps Code Reviewer"
+            "🛡 VibeCheck"
         )
 
         title.setObjectName(
