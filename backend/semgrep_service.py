@@ -1,20 +1,11 @@
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 
 from backend.models import Finding
-
-
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))
-)
-
-SEMGREP_CONFIG = os.path.join(
-    PROJECT_ROOT,
-    "semgrep_rules",
-    "python-security.yml"
-)
 
 
 ISSUE_TITLES = {
@@ -26,6 +17,38 @@ ISSUE_TITLES = {
 }
 
 
+def find_semgrep_executable() -> str | None:
+    """
+    Locate the Semgrep executable.
+
+    First checks PATH, then checks locations associated
+    with the currently running Python installation.
+    """
+
+    # 1. Check PATH
+    semgrep = shutil.which("semgrep")
+
+    if semgrep:
+        return semgrep
+
+    # 2. Check the current Python installation
+    python_dir = os.path.dirname(sys.executable)
+
+    possible_paths = [
+        os.path.join(python_dir, "Scripts", "semgrep.exe"),
+        os.path.join(python_dir, "Scripts", "semgrep"),
+        os.path.join(python_dir, "bin", "semgrep"),
+        os.path.join(python_dir, "semgrep.exe"),
+        os.path.join(python_dir, "semgrep"),
+    ]
+
+    for path in possible_paths:
+        if os.path.isfile(path):
+            return path
+
+    return None
+
+
 def get_code_evidence(
     code: str,
     start_line: int,
@@ -33,6 +56,7 @@ def get_code_evidence(
 ) -> str:
     """
     Extract the exact code lines flagged by Semgrep.
+
     Semgrep line numbers start from 1.
     """
 
@@ -48,34 +72,64 @@ def get_code_evidence(
 
 def scan_code(code: str, language: str) -> list[Finding]:
 
-    if language.lower() != "python":
+    # Semgrep auto configuration determines applicable rules.
+    # We still keep this check so unsupported/empty language values
+    # don't trigger unnecessary scans.
+    if not language.strip():
+        return []
+
+    semgrep_executable = find_semgrep_executable()
+
+    if semgrep_executable is None:
+        print(
+            "Semgrep executable not found. "
+            "Make sure Semgrep is installed."
+        )
         return []
 
     temp_file_path = None
 
     try:
+        # Create a temporary source file.
+        #
+        # The extension helps Semgrep identify the language.
+        suffix = ".py" if language.lower() == "python" else ".txt"
+
         with tempfile.NamedTemporaryFile(
             mode="w",
-            suffix=".py",
-            delete=False
+            suffix=suffix,
+            delete=False,
+            encoding="utf-8"
         ) as temp_file:
 
             temp_file.write(code)
             temp_file_path = temp_file.name
 
+        # Use Semgrep's automatic configuration.
+        #
+        # --config auto allows Semgrep to obtain applicable
+        # community rules instead of relying on our own
+        # python-security.yml file.
         result = subprocess.run(
             [
-                "semgrep",
+                semgrep_executable,
                 "--config",
-                SEMGREP_CONFIG,
+                "auto",
                 "--json",
                 temp_file_path
             ],
             capture_output=True,
             text=True,
-            timeout=60
+            encoding="utf-8",
+            errors="replace",
+            timeout=120
         )
 
+        # Semgrep may write useful diagnostic information to stderr.
+        if result.stderr.strip():
+            print("Semgrep:", result.stderr.strip())
+
+        # Parse JSON output.
         data = json.loads(result.stdout)
 
         findings = []
@@ -91,14 +145,19 @@ def scan_code(code: str, language: str) -> list[Finding]:
             start_line = start.get("line", 1)
             end_line = end.get("line", start_line)
 
+            check_id = finding.get(
+                "check_id",
+                "Semgrep Finding"
+            )
+
             issue_type = metadata.get(
                 "issue_type",
-                finding.get("check_id", "Semgrep Finding")
+                check_id
             )
 
             title = ISSUE_TITLES.get(
                 issue_type,
-                issue_type.replace("_", " ").title()
+                issue_type.replace("_", " ").replace("-", " ").title()
             )
 
             # Extract the ACTUAL flagged code from the submitted code.
@@ -108,57 +167,53 @@ def scan_code(code: str, language: str) -> list[Finding]:
                 end_line
             )
 
-            # Fallback only if line extraction somehow fails.
+            # Fallback if line extraction fails.
             if not evidence:
                 evidence = extra.get(
                     "message",
                     "Security issue detected by Semgrep."
                 ).strip()
 
-            findings.append(
+            severity = metadata.get(
+                "severity",
+                extra.get("severity", "MEDIUM")
+            ).upper()
 
-                Finding(
-            
-                    title=title,
-            
-                    category=metadata.get(
-                        "category",
-                        "security"
-                    ),
-            
-                    severity=metadata.get(
-                        "severity",
-                        extra.get("severity", "MEDIUM")
-                    ).upper(),
-            
-                    evidence=evidence,
-            
-                    impact=metadata.get(
-                        "impact",
-                        (
-                            f"Detected by Semgrep rule "
-                            f"{finding.get('check_id', 'unknown')} "
-                            f"at line {start_line}."
-                        )
-                    ),
-            
-                    remediation=metadata.get(
-                        "remediation",
-                        (
-                            "Review the flagged code and apply "
-                            "the recommended security fix."
-                        )
-                    ),
-            
-                    source=["semgrep"],
-            
-                    line_start=start_line,
-            
-                    line_end=end_line
-            
-                )
-            
+            category = metadata.get(
+                "category",
+                "security"
             )
+
+            impact = metadata.get(
+                "impact",
+                (
+                    f"Detected by Semgrep rule "
+                    f"{check_id} at line {start_line}."
+                )
+            )
+
+            remediation = metadata.get(
+                "remediation",
+                (
+                    "Review the flagged code and apply "
+                    "the recommended security fix."
+                )
+            )
+
+            findings.append(
+                Finding(
+                    title=title,
+                    category=category,
+                    severity=severity,
+                    evidence=evidence,
+                    impact=impact,
+                    remediation=remediation,
+                    source=["semgrep"],
+                    line_start=start_line,
+                    line_end=end_line
+                )
+            )
+
         return findings
 
     except subprocess.TimeoutExpired:
@@ -167,12 +222,17 @@ def scan_code(code: str, language: str) -> list[Finding]:
 
     except json.JSONDecodeError:
         print("Failed to parse Semgrep JSON output.")
+
+        if "result" in locals():
+            print("Semgrep stdout:")
+            print(result.stdout)
+
         return []
 
     except FileNotFoundError:
         print(
-            "Semgrep executable was not found. "
-            "Make sure Semgrep is installed and available in PATH."
+            "Semgrep executable could not be started. "
+            "Make sure Semgrep is installed correctly."
         )
         return []
 
@@ -181,5 +241,12 @@ def scan_code(code: str, language: str) -> list[Finding]:
         return []
 
     finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        if (
+            temp_file_path
+            and os.path.exists(temp_file_path)
+        ):
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
