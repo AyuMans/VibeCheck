@@ -1,5 +1,5 @@
 # VibeCheck
-
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/ebc8112e-32fd-4b4c-8e00-fb73067628b1" />
 A local, AI-assisted code security analysis application that combines **local LLM-based code review** with **Semgrep SAST analysis** to identify security vulnerabilities, bugs, and reliability issues in source code.
 
 The application is designed to run locally, keeping submitted source code and AI analysis on the user's machine rather than sending code to an external AI service.
