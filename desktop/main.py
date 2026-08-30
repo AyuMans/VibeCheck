@@ -70,6 +70,11 @@ from PySide6.QtWidgets import (
 )
 
 from backend.analysis_service import analyze_code
+from backend.language_detector import (
+    detect_language,
+    LANGUAGE_DISPLAY_NAMES,
+    UNKNOWN_LANGUAGE,
+)
 
 
 # ==========================================================
@@ -2170,6 +2175,25 @@ class MainWindow(QMainWindow):
         self.review_thread = None
         self.review_worker = None
 
+        # The last language detected from the editor's contents.
+        # Recomputed live (debounced) as the user types, and again
+        # right before a review is submitted.
+        self.detected_language = UNKNOWN_LANGUAGE
+
+        self._language_detect_timer = QTimer(self)
+
+        self._language_detect_timer.setSingleShot(
+            True
+        )
+
+        self._language_detect_timer.setInterval(
+            400
+        )
+
+        self._language_detect_timer.timeout.connect(
+            self._update_detected_language
+        )
+
         central_widget = QWidget()
 
         self.setCentralWidget(
@@ -2386,6 +2410,10 @@ class MainWindow(QMainWindow):
             self._update_line_count
         )
 
+        self.code_editor.textChanged.connect(
+            self._schedule_language_detection
+        )
+
         code_layout.addWidget(
             self.code_editor,
             stretch=1,
@@ -2433,20 +2461,36 @@ class MainWindow(QMainWindow):
             language_label
         )
 
-        self.language_selector = (
-            QComboBox()
+        # Language is now detected automatically from the submitted
+        # code rather than chosen manually, so this is a read-only
+        # indicator (kept in the same layout slot as the old
+        # dropdown) rather than an interactive control.
+        self.language_display = (
+            QLabel(
+                LANGUAGE_DISPLAY_NAMES[UNKNOWN_LANGUAGE]
+            )
         )
 
-        self.language_selector.addItems(
-            ["Python"]
+        self.language_display.setAlignment(
+            Qt.AlignCenter
         )
 
-        self.language_selector.setFixedWidth(
+        self.language_display.setStyleSheet(
+            f"""
+            color: {COLORS['text']};
+            background-color: {COLORS['panel_alt']};
+            border: 1px solid {COLORS['border']};
+            border-radius: 4px;
+            padding: 4px 10px;
+            """
+        )
+
+        self.language_display.setFixedWidth(
             140
         )
 
         layout.addWidget(
-            self.language_selector
+            self.language_display
         )
 
         layout.addStretch()
@@ -2606,6 +2650,33 @@ class MainWindow(QMainWindow):
             f"{'s' if line_count != 1 else ''}"
         )
 
+    def _schedule_language_detection(self):
+
+        # Restart the debounce timer on every keystroke so detection
+        # only runs once typing pauses, instead of on every character.
+        self._language_detect_timer.start()
+
+    @Slot()
+    def _update_detected_language(self):
+
+        code = (
+            self.code_editor
+            .toPlainText()
+        )
+
+        language = detect_language(
+            code
+        )
+
+        self.detected_language = language
+
+        self.language_display.setText(
+            LANGUAGE_DISPLAY_NAMES.get(
+                language,
+                LANGUAGE_DISPLAY_NAMES[UNKNOWN_LANGUAGE],
+            )
+        )
+
     def _clear_code(self):
 
         self.code_editor.clear()
@@ -2690,12 +2761,6 @@ class MainWindow(QMainWindow):
             .toPlainText()
         )
 
-        language = (
-            self.language_selector
-            .currentText()
-            .lower()
-        )
-
         if not code.strip():
 
             self._show_findings_placeholder(
@@ -2703,6 +2768,23 @@ class MainWindow(QMainWindow):
             )
 
             return
+
+        # Detect the language synchronously right before review so
+        # the AI and Semgrep pipeline always analyzes against the
+        # code actually being submitted, even if the debounce timer
+        # from live typing hasn't fired yet.
+        language = detect_language(
+            code
+        )
+
+        self.detected_language = language
+
+        self.language_display.setText(
+            LANGUAGE_DISPLAY_NAMES.get(
+                language,
+                LANGUAGE_DISPLAY_NAMES[UNKNOWN_LANGUAGE],
+            )
+        )
 
         self.review_button.setEnabled(
             False
@@ -2712,7 +2794,7 @@ class MainWindow(QMainWindow):
             False
         )
 
-        self.language_selector.setEnabled(
+        self.language_display.setEnabled(
             False
         )
 
@@ -2847,7 +2929,7 @@ class MainWindow(QMainWindow):
             True
         )
 
-        self.language_selector.setEnabled(
+        self.language_display.setEnabled(
             True
         )
 
